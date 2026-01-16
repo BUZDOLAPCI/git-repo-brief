@@ -1,149 +1,406 @@
-import { createServer, IncomingMessage, ServerResponse } from 'http';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { randomUUID } from 'crypto';
+import { createServer, IncomingMessage, ServerResponse, Server } from 'http';
 import { getConfig } from '../config.js';
-import { createServer as createMcpServer } from '../server.js';
+import {
+  RepoOverviewInputSchema,
+  ExtractKeyFilesInputSchema,
+  ReleaseNotesInputSchema,
+  ActivitySnapshotInputSchema,
+} from '../types.js';
+import { repoOverview, extractKeyFiles, releaseNotes, activitySnapshot } from '../tools/index.js';
 
-// Session management for MCP connections
-const sessions = new Map<string, { transport: StreamableHTTPServerTransport; server: ReturnType<typeof createMcpServer> }>();
+/**
+ * JSON-RPC request interface
+ */
+interface JsonRpcRequest {
+  jsonrpc: string;
+  id: number | string;
+  method: string;
+  params?: Record<string, unknown>;
+}
 
-async function handleMcpRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  // Handle CORS preflight
-  if (req.method === 'OPTIONS') {
-    res.writeHead(204, {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Mcp-Session-Id',
-    });
-    res.end();
-    return;
-  }
+/**
+ * JSON-RPC response interface
+ */
+interface JsonRpcResponse {
+  jsonrpc: '2.0';
+  id: number | string;
+  result?: unknown;
+  error?: {
+    code: number;
+    message: string;
+  };
+}
 
-  // Set CORS headers for all responses
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Mcp-Session-Id');
+/**
+ * Tool definitions for MCP tools/list
+ */
+const toolDefinitions = [
+  {
+    name: 'repo_overview',
+    description:
+      'Get a comprehensive overview of a public GitHub repository including name, description, stars, forks, language, topics, license, and timestamps.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo_url: {
+          type: 'string',
+          description:
+            'The GitHub repository URL (e.g., https://github.com/owner/repo)',
+        },
+      },
+      required: ['repo_url'],
+    },
+  },
+  {
+    name: 'extract_key_files',
+    description:
+      'Fetch the contents of key files from a GitHub repository such as README.md, LICENSE, package.json, and pyproject.toml.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo_url: {
+          type: 'string',
+          description:
+            'The GitHub repository URL (e.g., https://github.com/owner/repo)',
+        },
+        paths: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Optional array of file paths to fetch. Defaults to: README.md, LICENSE, package.json, pyproject.toml',
+        },
+      },
+      required: ['repo_url'],
+    },
+  },
+  {
+    name: 'release_notes',
+    description:
+      'Get recent release notes from a GitHub repository including tag names, release names, body content, and publication dates.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo_url: {
+          type: 'string',
+          description:
+            'The GitHub repository URL (e.g., https://github.com/owner/repo)',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum number of releases to fetch (1-100, default: 5)',
+        },
+      },
+      required: ['repo_url'],
+    },
+  },
+  {
+    name: 'activity_snapshot',
+    description:
+      'Get a snapshot of recent activity for a GitHub repository including last commit date, open issues count, open PRs count, and contributors count.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo_url: {
+          type: 'string',
+          description:
+            'The GitHub repository URL (e.g., https://github.com/owner/repo)',
+        },
+      },
+      required: ['repo_url'],
+    },
+  },
+];
 
-  const sessionId = req.headers['mcp-session-id'] as string | undefined;
+/**
+ * Handle a single JSON-RPC request
+ */
+async function handleJsonRpcRequest(request: JsonRpcRequest): Promise<JsonRpcResponse> {
+  const { id, method, params } = request;
 
-  if (req.method === 'POST') {
-    // For POST requests, check if we have an existing session or need to create one
-    let session = sessionId ? sessions.get(sessionId) : undefined;
+  try {
+    switch (method) {
+      case 'initialize': {
+        return {
+          jsonrpc: '2.0',
+          id,
+          result: {
+            protocolVersion: '2024-11-05',
+            capabilities: {
+              tools: {},
+            },
+            serverInfo: {
+              name: 'git-repo-brief',
+              version: '1.0.0',
+            },
+          },
+        };
+      }
 
-    if (!session) {
-      // Create a new session
-      const newSessionId = randomUUID();
-      const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => newSessionId,
-      });
-      const server = createMcpServer();
+      case 'tools/list': {
+        return {
+          jsonrpc: '2.0',
+          id,
+          result: {
+            tools: toolDefinitions,
+          },
+        };
+      }
 
-      await server.connect(transport);
+      case 'tools/call': {
+        const toolName = params?.name as string;
+        const args = params?.arguments as Record<string, unknown>;
 
-      session = { transport, server };
-      sessions.set(newSessionId, session);
+        let result: unknown;
 
-      // Clean up session when transport closes
-      transport.onclose = () => {
-        sessions.delete(newSessionId);
-      };
+        switch (toolName) {
+          case 'repo_overview': {
+            const parsed = RepoOverviewInputSchema.safeParse(args);
+            if (!parsed.success) {
+              result = {
+                ok: false,
+                error: {
+                  code: 'INVALID_INPUT',
+                  message: 'Invalid input parameters',
+                  details: { errors: parsed.error.errors },
+                },
+                meta: { retrieved_at: new Date().toISOString() },
+              };
+            } else {
+              result = await repoOverview(parsed.data.repo_url);
+            }
+            break;
+          }
+
+          case 'extract_key_files': {
+            const parsed = ExtractKeyFilesInputSchema.safeParse(args);
+            if (!parsed.success) {
+              result = {
+                ok: false,
+                error: {
+                  code: 'INVALID_INPUT',
+                  message: 'Invalid input parameters',
+                  details: { errors: parsed.error.errors },
+                },
+                meta: { retrieved_at: new Date().toISOString() },
+              };
+            } else {
+              result = await extractKeyFiles(parsed.data.repo_url, parsed.data.paths);
+            }
+            break;
+          }
+
+          case 'release_notes': {
+            const parsed = ReleaseNotesInputSchema.safeParse(args);
+            if (!parsed.success) {
+              result = {
+                ok: false,
+                error: {
+                  code: 'INVALID_INPUT',
+                  message: 'Invalid input parameters',
+                  details: { errors: parsed.error.errors },
+                },
+                meta: { retrieved_at: new Date().toISOString() },
+              };
+            } else {
+              result = await releaseNotes(parsed.data.repo_url, parsed.data.limit);
+            }
+            break;
+          }
+
+          case 'activity_snapshot': {
+            const parsed = ActivitySnapshotInputSchema.safeParse(args);
+            if (!parsed.success) {
+              result = {
+                ok: false,
+                error: {
+                  code: 'INVALID_INPUT',
+                  message: 'Invalid input parameters',
+                  details: { errors: parsed.error.errors },
+                },
+                meta: { retrieved_at: new Date().toISOString() },
+              };
+            } else {
+              result = await activitySnapshot(parsed.data.repo_url);
+            }
+            break;
+          }
+
+          default:
+            return {
+              jsonrpc: '2.0',
+              id,
+              error: {
+                code: -32601,
+                message: `Unknown tool: ${toolName}`,
+              },
+            };
+        }
+
+        return {
+          jsonrpc: '2.0',
+          id,
+          result: {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(result, null, 2),
+              },
+            ],
+          },
+        };
+      }
+
+      default:
+        return {
+          jsonrpc: '2.0',
+          id,
+          error: {
+            code: -32601,
+            message: `Method not found: ${method}`,
+          },
+        };
     }
-
-    // Handle the request with the transport
-    await session.transport.handleRequest(req, res);
-  } else if (req.method === 'GET') {
-    // GET requests are for SSE streams (Server-Sent Events)
-    if (!sessionId) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Missing Mcp-Session-Id header for GET request' }));
-      return;
-    }
-
-    const session = sessions.get(sessionId);
-    if (!session) {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Session not found' }));
-      return;
-    }
-
-    await session.transport.handleRequest(req, res);
-  } else if (req.method === 'DELETE') {
-    // DELETE requests close sessions
-    if (!sessionId) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Missing Mcp-Session-Id header for DELETE request' }));
-      return;
-    }
-
-    const session = sessions.get(sessionId);
-    if (!session) {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Session not found' }));
-      return;
-    }
-
-    await session.transport.handleRequest(req, res);
-    sessions.delete(sessionId);
-  } else {
-    res.writeHead(405, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Method not allowed' }));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return {
+      jsonrpc: '2.0',
+      id,
+      error: {
+        code: -32603,
+        message: `Internal error: ${message}`,
+      },
+    };
   }
 }
 
+/**
+ * Read the request body as a string
+ */
+function readBody(req: IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
+    req.on('error', reject);
+  });
+}
+
+/**
+ * Send a JSON response
+ */
+function sendJson(res: ServerResponse, statusCode: number, data: unknown): void {
+  const body = JSON.stringify(data);
+  res.writeHead(statusCode, {
+    'Content-Type': 'application/json',
+    'Content-Length': Buffer.byteLength(body),
+  });
+  res.end(body);
+}
+
+/**
+ * Handle health check endpoint
+ */
 function handleHealthCheck(res: ServerResponse): void {
-  res.writeHead(200, {
-    'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
-  });
-  res.end(JSON.stringify({
-    status: 'ok',
-    timestamp: new Date().toISOString(),
-    sessions: sessions.size,
-  }));
+  sendJson(res, 200, { status: 'ok', service: 'git-repo-brief' });
 }
 
+/**
+ * Handle not found
+ */
 function handleNotFound(res: ServerResponse): void {
-  res.writeHead(404, {
-    'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
-  });
-  res.end(JSON.stringify({ error: 'Not found' }));
+  sendJson(res, 404, { error: 'Not found' });
 }
 
-export async function runHttpTransport(): Promise<void> {
-  const config = getConfig();
-  const port = config.httpPort;
+/**
+ * Handle method not allowed
+ */
+function handleMethodNotAllowed(res: ServerResponse): void {
+  sendJson(res, 405, { error: 'Method not allowed' });
+}
 
+/**
+ * Handle MCP JSON-RPC endpoint
+ */
+async function handleMcpRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  try {
+    const body = await readBody(req);
+    const request: JsonRpcRequest = JSON.parse(body);
+
+    if (!request.jsonrpc || request.jsonrpc !== '2.0') {
+      sendJson(res, 400, {
+        jsonrpc: '2.0',
+        id: request.id || 0,
+        error: {
+          code: -32600,
+          message: 'Invalid Request: missing or invalid jsonrpc version',
+        },
+      });
+      return;
+    }
+
+    const response = await handleJsonRpcRequest(request);
+    sendJson(res, 200, response);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    sendJson(res, 500, {
+      ok: false,
+      error: message,
+    });
+  }
+}
+
+/**
+ * Create and configure the HTTP server
+ */
+export function createHttpServer(): Server {
   const httpServer = createServer();
 
   httpServer.on('request', async (req: IncomingMessage, res: ServerResponse) => {
-    const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+    const url = new URL(req.url!, `http://${req.headers.host || 'localhost'}`);
+    const method = req.method?.toUpperCase();
 
     try {
       switch (url.pathname) {
         case '/mcp':
-          await handleMcpRequest(req, res);
+          if (method === 'POST') {
+            await handleMcpRequest(req, res);
+          } else {
+            handleMethodNotAllowed(res);
+          }
           break;
+
         case '/health':
-          handleHealthCheck(res);
+          if (method === 'GET') {
+            handleHealthCheck(res);
+          } else {
+            handleMethodNotAllowed(res);
+          }
           break;
+
         default:
           handleNotFound(res);
       }
     } catch (error) {
-      console.error('Error handling request:', error);
-      if (!res.headersSent) {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          error: 'Internal server error',
-          message: error instanceof Error ? error.message : 'Unknown error',
-        }));
-      }
+      console.error('Server error:', error);
+      const message = error instanceof Error ? error.message : 'Internal server error';
+      sendJson(res, 500, { ok: false, error: message });
     }
   });
 
+  return httpServer;
+}
+
+/**
+ * Start the HTTP transport
+ */
+export async function runHttpTransport(): Promise<void> {
+  const config = getConfig();
+  const port = config.httpPort;
+
+  const httpServer = createHttpServer();
+
   httpServer.listen(port, () => {
-    console.log(`MCP HTTP server listening on port ${port}`);
+    console.log(`git-repo-brief HTTP server listening on port ${port}`);
     console.log(`MCP endpoint: http://localhost:${port}/mcp`);
     console.log(`Health check: http://localhost:${port}/health`);
   });
@@ -151,22 +408,12 @@ export async function runHttpTransport(): Promise<void> {
   // Handle graceful shutdown
   process.on('SIGINT', () => {
     console.log('\nShutting down...');
-    // Close all sessions
-    for (const [sessionId, session] of sessions) {
-      session.server.close();
-      sessions.delete(sessionId);
-    }
     httpServer.close(() => {
       process.exit(0);
     });
   });
 
   process.on('SIGTERM', () => {
-    // Close all sessions
-    for (const [sessionId, session] of sessions) {
-      session.server.close();
-      sessions.delete(sessionId);
-    }
     httpServer.close(() => {
       process.exit(0);
     });
