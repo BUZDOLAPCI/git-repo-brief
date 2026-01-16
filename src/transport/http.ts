@@ -1,188 +1,173 @@
-import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from 'http';
+import { createServer, IncomingMessage, ServerResponse } from 'http';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { randomUUID } from 'crypto';
 import { getConfig } from '../config.js';
-import { repoOverview, extractKeyFiles, releaseNotes, activitySnapshot } from '../tools/index.js';
-import {
-  RepoOverviewInputSchema,
-  ExtractKeyFilesInputSchema,
-  ReleaseNotesInputSchema,
-  ActivitySnapshotInputSchema,
-  createErrorResponse,
-} from '../types.js';
+import { createServer as createMcpServer } from '../server.js';
 
-function parseBody(req: IncomingMessage): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    let body = '';
-    req.on('data', (chunk) => {
-      body += chunk.toString();
-    });
-    req.on('end', () => {
-      try {
-        resolve(body ? JSON.parse(body) : {});
-      } catch {
-        reject(new Error('Invalid JSON body'));
-      }
-    });
-    req.on('error', reject);
-  });
-}
+// Session management for MCP connections
+const sessions = new Map<string, { transport: StreamableHTTPServerTransport; server: ReturnType<typeof createMcpServer> }>();
 
-function sendJson(res: ServerResponse, statusCode: number, data: unknown): void {
-  res.writeHead(statusCode, {
-    'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
-  });
-  res.end(JSON.stringify(data, null, 2));
-}
-
-async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function handleMcpRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
   // Handle CORS preflight
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
       'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
+      'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Mcp-Session-Id',
     });
     res.end();
     return;
   }
 
-  const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
-  const path = url.pathname;
+  // Set CORS headers for all responses
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Mcp-Session-Id');
 
-  // Health check
-  if (path === '/health' && req.method === 'GET') {
-    sendJson(res, 200, { status: 'ok', timestamp: new Date().toISOString() });
-    return;
-  }
+  const sessionId = req.headers['mcp-session-id'] as string | undefined;
 
-  // List tools
-  if (path === '/tools' && req.method === 'GET') {
-    sendJson(res, 200, {
-      tools: [
-        { name: 'repo_overview', description: 'Get repository overview' },
-        { name: 'extract_key_files', description: 'Fetch key files from repository' },
-        { name: 'release_notes', description: 'Get recent release notes' },
-        { name: 'activity_snapshot', description: 'Get activity snapshot' },
-      ],
-    });
-    return;
-  }
+  if (req.method === 'POST') {
+    // For POST requests, check if we have an existing session or need to create one
+    let session = sessionId ? sessions.get(sessionId) : undefined;
 
-  // Tool endpoints
-  if (req.method !== 'POST') {
-    sendJson(res, 405, createErrorResponse('INVALID_INPUT', 'Method not allowed'));
-    return;
-  }
+    if (!session) {
+      // Create a new session
+      const newSessionId = randomUUID();
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => newSessionId,
+      });
+      const server = createMcpServer();
 
-  try {
-    const body = await parseBody(req);
+      await server.connect(transport);
 
-    switch (path) {
-      case '/tools/repo_overview': {
-        const parsed = RepoOverviewInputSchema.safeParse(body);
-        if (!parsed.success) {
-          sendJson(
-            res,
-            400,
-            createErrorResponse('INVALID_INPUT', 'Invalid input', {
-              errors: parsed.error.errors,
-            })
-          );
-          return;
-        }
-        const result = await repoOverview(parsed.data.repo_url);
-        sendJson(res, result.ok ? 200 : 400, result);
-        return;
-      }
+      session = { transport, server };
+      sessions.set(newSessionId, session);
 
-      case '/tools/extract_key_files': {
-        const parsed = ExtractKeyFilesInputSchema.safeParse(body);
-        if (!parsed.success) {
-          sendJson(
-            res,
-            400,
-            createErrorResponse('INVALID_INPUT', 'Invalid input', {
-              errors: parsed.error.errors,
-            })
-          );
-          return;
-        }
-        const result = await extractKeyFiles(parsed.data.repo_url, parsed.data.paths);
-        sendJson(res, result.ok ? 200 : 400, result);
-        return;
-      }
-
-      case '/tools/release_notes': {
-        const parsed = ReleaseNotesInputSchema.safeParse(body);
-        if (!parsed.success) {
-          sendJson(
-            res,
-            400,
-            createErrorResponse('INVALID_INPUT', 'Invalid input', {
-              errors: parsed.error.errors,
-            })
-          );
-          return;
-        }
-        const result = await releaseNotes(parsed.data.repo_url, parsed.data.limit);
-        sendJson(res, result.ok ? 200 : 400, result);
-        return;
-      }
-
-      case '/tools/activity_snapshot': {
-        const parsed = ActivitySnapshotInputSchema.safeParse(body);
-        if (!parsed.success) {
-          sendJson(
-            res,
-            400,
-            createErrorResponse('INVALID_INPUT', 'Invalid input', {
-              errors: parsed.error.errors,
-            })
-          );
-          return;
-        }
-        const result = await activitySnapshot(parsed.data.repo_url);
-        sendJson(res, result.ok ? 200 : 400, result);
-        return;
-      }
-
-      default:
-        sendJson(res, 404, createErrorResponse('INVALID_INPUT', `Unknown endpoint: ${path}`));
+      // Clean up session when transport closes
+      transport.onclose = () => {
+        sessions.delete(newSessionId);
+      };
     }
-  } catch (error) {
-    sendJson(
-      res,
-      500,
-      createErrorResponse(
-        'INTERNAL_ERROR',
-        error instanceof Error ? error.message : 'Unknown error'
-      )
-    );
+
+    // Handle the request with the transport
+    await session.transport.handleRequest(req, res);
+  } else if (req.method === 'GET') {
+    // GET requests are for SSE streams (Server-Sent Events)
+    if (!sessionId) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Missing Mcp-Session-Id header for GET request' }));
+      return;
+    }
+
+    const session = sessions.get(sessionId);
+    if (!session) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Session not found' }));
+      return;
+    }
+
+    await session.transport.handleRequest(req, res);
+  } else if (req.method === 'DELETE') {
+    // DELETE requests close sessions
+    if (!sessionId) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Missing Mcp-Session-Id header for DELETE request' }));
+      return;
+    }
+
+    const session = sessions.get(sessionId);
+    if (!session) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Session not found' }));
+      return;
+    }
+
+    await session.transport.handleRequest(req, res);
+    sessions.delete(sessionId);
+  } else {
+    res.writeHead(405, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Method not allowed' }));
   }
+}
+
+function handleHealthCheck(res: ServerResponse): void {
+  res.writeHead(200, {
+    'Content-Type': 'application/json',
+    'Access-Control-Allow-Origin': '*',
+  });
+  res.end(JSON.stringify({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    sessions: sessions.size,
+  }));
+}
+
+function handleNotFound(res: ServerResponse): void {
+  res.writeHead(404, {
+    'Content-Type': 'application/json',
+    'Access-Control-Allow-Origin': '*',
+  });
+  res.end(JSON.stringify({ error: 'Not found' }));
 }
 
 export async function runHttpTransport(): Promise<void> {
   const config = getConfig();
-  const server = createHttpServer(handleRequest);
+  const port = config.httpPort;
 
-  server.listen(config.httpPort, () => {
-    console.log(`HTTP server listening on port ${config.httpPort}`);
-    console.log(`Health check: http://localhost:${config.httpPort}/health`);
-    console.log(`Tools list: http://localhost:${config.httpPort}/tools`);
+  const httpServer = createServer();
+
+  httpServer.on('request', async (req: IncomingMessage, res: ServerResponse) => {
+    const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+
+    try {
+      switch (url.pathname) {
+        case '/mcp':
+          await handleMcpRequest(req, res);
+          break;
+        case '/health':
+          handleHealthCheck(res);
+          break;
+        default:
+          handleNotFound(res);
+      }
+    } catch (error) {
+      console.error('Error handling request:', error);
+      if (!res.headersSent) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          error: 'Internal server error',
+          message: error instanceof Error ? error.message : 'Unknown error',
+        }));
+      }
+    }
+  });
+
+  httpServer.listen(port, () => {
+    console.log(`MCP HTTP server listening on port ${port}`);
+    console.log(`MCP endpoint: http://localhost:${port}/mcp`);
+    console.log(`Health check: http://localhost:${port}/health`);
   });
 
   // Handle graceful shutdown
   process.on('SIGINT', () => {
     console.log('\nShutting down...');
-    server.close(() => {
+    // Close all sessions
+    for (const [sessionId, session] of sessions) {
+      session.server.close();
+      sessions.delete(sessionId);
+    }
+    httpServer.close(() => {
       process.exit(0);
     });
   });
 
   process.on('SIGTERM', () => {
-    server.close(() => {
+    // Close all sessions
+    for (const [sessionId, session] of sessions) {
+      session.server.close();
+      sessions.delete(sessionId);
+    }
+    httpServer.close(() => {
       process.exit(0);
     });
   });

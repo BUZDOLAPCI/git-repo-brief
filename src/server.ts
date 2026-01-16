@@ -1,4 +1,5 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -11,6 +12,15 @@ import {
 } from './types.js';
 import { repoOverview, extractKeyFiles, releaseNotes, activitySnapshot } from './tools/index.js';
 
+export interface StandaloneServer {
+  server: Server;
+  transport: StreamableHTTPServerTransport;
+}
+
+/**
+ * Creates an MCP server instance with all tool handlers configured.
+ * Use this for stdio transport or when you need just the server.
+ */
 export function createServer(): Server {
   const server = new Server(
     {
@@ -279,4 +289,22 @@ export function createServer(): Server {
   });
 
   return server;
+}
+
+/**
+ * Creates a standalone MCP server with its own transport for HTTP use.
+ * Returns both the server and transport so they can be managed together.
+ *
+ * @param sessionId - Optional session ID for the transport
+ * @returns StandaloneServer with server and transport instances
+ */
+export async function createStandaloneServer(sessionId?: string): Promise<StandaloneServer> {
+  const server = createServer();
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: sessionId ? () => sessionId : undefined,
+  });
+
+  await server.connect(transport);
+
+  return { server, transport };
 }
