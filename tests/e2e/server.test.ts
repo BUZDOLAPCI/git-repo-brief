@@ -1,52 +1,24 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createServer } from '../../src/server.js';
+import { createHttpServer } from '../../src/transport/http.js';
 
 // Mock fetch globally
 const mockFetch = vi.fn();
 global.fetch = mockFetch;
 
 describe('MCP Server E2E Tests', () => {
-  let server: ReturnType<typeof createServer>;
-
   beforeEach(() => {
     vi.resetAllMocks();
-    server = createServer();
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  describe('Server Creation', () => {
-    it('should create a server instance', () => {
+  describe('HTTP Server Creation', () => {
+    it('should create an HTTP server instance', () => {
+      const server = createHttpServer();
       expect(server).toBeDefined();
-    });
-  });
-
-  describe('Tool Listing', () => {
-    it('should list all available tools', async () => {
-      // Create a mock transport to interact with the server
-      const mockTransport = {
-        start: vi.fn(),
-        send: vi.fn(),
-        close: vi.fn(),
-        onmessage: null as ((message: unknown) => void) | null,
-        onerror: null as ((error: Error) => void) | null,
-        onclose: null as (() => void) | null,
-      };
-
-      // We'll test the server's request handlers directly
-      // by simulating the ListTools request
-      const listToolsRequest = {
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'tools/list',
-        params: {},
-      };
-
-      // Since we can't easily test MCP server without full transport,
-      // we'll verify the server was created with correct capabilities
-      expect(server).toBeDefined();
+      server.close();
     });
   });
 

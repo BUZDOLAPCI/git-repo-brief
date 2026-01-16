@@ -391,19 +391,29 @@ export function createHttpServer(): Server {
 }
 
 /**
- * Start the HTTP transport
+ * Start the HTTP transport with the given config
  */
-export async function runHttpTransport(): Promise<void> {
-  const config = getConfig();
-  const port = config.httpPort;
+export function startHttpTransport(config: { port?: number; host?: string } = {}): Server {
+  const appConfig = getConfig();
+  const port = config.port ?? appConfig.httpPort;
+  const host = config.host ?? '0.0.0.0';
 
   const httpServer = createHttpServer();
 
-  httpServer.listen(port, () => {
-    console.log(`git-repo-brief HTTP server listening on port ${port}`);
-    console.log(`MCP endpoint: http://localhost:${port}/mcp`);
-    console.log(`Health check: http://localhost:${port}/health`);
+  httpServer.listen(port, host, () => {
+    console.log(`git-repo-brief HTTP server listening on http://${host}:${port}`);
+    console.log(`MCP endpoint: http://${host}:${port}/mcp`);
+    console.log(`Health check: http://${host}:${port}/health`);
   });
+
+  return httpServer;
+}
+
+/**
+ * Start the HTTP transport (legacy function for compatibility)
+ */
+export async function runHttpTransport(): Promise<void> {
+  const httpServer = startHttpTransport();
 
   // Handle graceful shutdown
   process.on('SIGINT', () => {

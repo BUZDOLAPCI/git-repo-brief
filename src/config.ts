@@ -2,7 +2,6 @@ export interface Config {
   githubToken?: string;
   requestDelayMs: number;
   requestTimeoutMs: number;
-  transportMode: 'stdio' | 'http';
   httpPort: number;
   userAgent: string;
 }
@@ -14,17 +13,11 @@ function getEnvNumber(key: string, defaultValue: number): number {
   return isNaN(parsed) ? defaultValue : parsed;
 }
 
-function getEnvString<T extends string>(key: string, defaultValue: T): T {
-  const value = process.env[key];
-  return (value as T) ?? defaultValue;
-}
-
 export function loadConfig(): Config {
   return {
     githubToken: process.env.GITHUB_TOKEN,
     requestDelayMs: getEnvNumber('REQUEST_DELAY_MS', 100),
     requestTimeoutMs: getEnvNumber('REQUEST_TIMEOUT_MS', 30000),
-    transportMode: getEnvString('TRANSPORT_MODE', 'http') as 'stdio' | 'http',
     httpPort: getEnvNumber('HTTP_PORT', 8080),
     userAgent: 'git-repo-brief/1.0.0',
   };
