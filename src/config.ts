@@ -24,8 +24,8 @@ export function loadConfig(): Config {
     githubToken: process.env.GITHUB_TOKEN,
     requestDelayMs: getEnvNumber('REQUEST_DELAY_MS', 100),
     requestTimeoutMs: getEnvNumber('REQUEST_TIMEOUT_MS', 30000),
-    transportMode: getEnvString('TRANSPORT_MODE', 'stdio') as 'stdio' | 'http',
-    httpPort: getEnvNumber('HTTP_PORT', 3000),
+    transportMode: getEnvString('TRANSPORT_MODE', 'http') as 'stdio' | 'http',
+    httpPort: getEnvNumber('HTTP_PORT', 8080),
     userAgent: 'git-repo-brief/1.0.0',
   };
 }

@@ -23,16 +23,16 @@ Usage:
   git-repo-brief [options]
 
 Options:
-  --stdio     Run in stdio mode (default, for MCP clients)
-  --http      Run in HTTP mode (for direct API access)
+  --stdio     Run in stdio mode (for MCP clients)
+  --http      Run in HTTP mode (default, for direct API access)
   --help, -h  Show this help message
 
 Environment Variables:
   GITHUB_TOKEN       GitHub personal access token (optional, increases rate limit)
   REQUEST_DELAY_MS   Delay between requests in ms (default: 100)
   REQUEST_TIMEOUT_MS Request timeout in ms (default: 30000)
-  TRANSPORT_MODE     Transport mode: stdio | http (default: stdio)
-  HTTP_PORT          HTTP server port (default: 3000)
+  TRANSPORT_MODE     Transport mode: stdio | http (default: http)
+  HTTP_PORT          HTTP server port (default: 8080)
 
 Examples:
   # Run as MCP server (stdio mode)
